@@ -23,8 +23,17 @@ const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'data.json');
-const GAME_DIR = path.resolve(__dirname, '..'); // the folder with index.html
+// Folder that contains index.html + three.js.
+// Locally server.js sits in online/ and the game is one level up ('..').
+// On Render the repo root holds both server.js and the game files (__dirname).
+const GAME_DIR = fs.existsSync(path.join(__dirname, 'index.html'))
+  ? __dirname
+  : path.resolve(__dirname, '..');
 const MAX_BODY = 4 * 1024 * 1024;               // 4 MB is plenty for a save
+
+// Boosty promo code: redeemable once per account (multiplayer).
+const PROMO_CODE = 'THANKYOU100';
+const PROMO_REWARD = 100;
 
 // Reads simple KEY=VALUE lines from a local .env file (no external package).
 // Handy locally: put DATABASE_URL there instead of typing it in PowerShell.
@@ -158,6 +167,13 @@ function makeFileStore() {
       db.accounts.push(account);
       saveData();
     },
+    async redeemPromo(accountId) {
+      const acc = db.accounts.find((a) => a.id === accountId);
+      if (!acc || acc.promo_used) return false;
+      acc.promo_used = true;
+      saveData();
+      return true;
+    },
     async accountById(id) {
       return db.accounts.find((a) => a.id === id) || null;
     },
@@ -249,6 +265,7 @@ function makePgStore() {
           pass_salt TEXT NOT NULL,
           created_at BIGINT NOT NULL
         )`);
+      await pool.query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS promo_used BOOLEAN NOT NULL DEFAULT FALSE');
       await pool.query(`
         CREATE TABLE IF NOT EXISTS sessions (
           token TEXT PRIMARY KEY,
@@ -281,6 +298,10 @@ function makePgStore() {
       await pool.query(
         'INSERT INTO accounts(id,login,login_lower,pass_hash,pass_salt,created_at) VALUES($1,$2,$3,$4,$5,$6)',
         [a.id, a.login, a.login_lower, a.pass_hash, a.pass_salt, a.created_at]);
+    },
+    async redeemPromo(accountId) {
+      const r = await pool.query('UPDATE accounts SET promo_used=TRUE WHERE id=$1 AND promo_used=FALSE', [accountId]);
+      return r.rowCount > 0;
     },
     async accountById(id) {
       const r = await pool.query('SELECT * FROM accounts WHERE id=$1', [id]);
@@ -454,6 +475,20 @@ async function handleApi(req, res, pathname, query) {
       plotId,
       save: player ? player.save : null,
     });
+    return true;
+  }
+
+  if (pathname === '/api/promo' && req.method === 'POST') {
+    const account = await authAccount(req);
+    if (!account) { sendJSON(res, 401, { error: 'unauthorized' }); return true; }
+    let body;
+    try { body = await readBody(req); }
+    catch (e) { sendJSON(res, 400, { error: e.message }); return true; }
+    const code = String(body.code || '').trim().toUpperCase();
+    if (code !== PROMO_CODE) { sendJSON(res, 400, { error: 'bad_code' }); return true; }
+    const granted = await store.redeemPromo(account.id);
+    if (!granted) { sendJSON(res, 409, { error: 'already_used' }); return true; }
+    sendJSON(res, 200, { ok: true, reward: PROMO_REWARD });
     return true;
   }
 
